@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Snake Clash 3D (Three.js)</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0f14; }
+    canvas { display: block; }
+    .hud {
+      position: fixed; left: 12px; top: 10px;
+      color: #cbd5e1; font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      opacity: 0.9; user-select: none;
+    }
+    .hud b { color: #e2e8f0; }
+  </style>
+
+  <!-- Import map keeps this as a single file -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="hud">
+    Move mouse • Eat dots to grow • Bigger body kills • Cut smaller snakes in the middle • AI fights AI<br/>
+    <span id="stats"></span>
+  </div>
+
+<script type="module">
+import * as THREE from "three";
+
+/* -----------------------------
+   Config
+----------------------------- */
+const WORLD_SIZE = 80;                 // arena half-size (x,z in [-WORLD_SIZE, WORLD_SIZE])
+const FOOD_COUNT = 320;
+const AI_TARGET  = 8;
+
+const MAX_LEN = 320;                   // max segments per snake (instanced)
+const SEG_SPACING = 0.65;              // distance between segments
+const SEG_RADIUS  = 0.33;              // visual radius
+const COLLIDE_R   = 0.55;              // head-to-body collide radius baseline
+
+const MIDDLE_MARGIN = 8;               // segments away from head/tail to count as “middle”
+const GROW_PLAYER = 2;
+const GROW_AI     = 1;
+
+const BASE_SPEED_PLAYER = 8.2;         // units/sec
+const BASE_SPEED_AI     = 7.4;
+const TURN_SMOOTH = 0.14;              // velocity smoothing (higher = snappier)
+
+const RAMP_MAX = 0.12;                 // +12% cap
+const RAMP_SECS = 120;                 // time to reach cap
+const LONG_PENALTY_START = 100;
+const LONG_PENALTY_PER_SEG = 0.0026;   // mild slowdown for very long snakes (keeps control)
+
+/* -----------------------------
+   Three.js setup
+----------------------------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0b0f14, 40, 220);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(0, 18, 20);
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.35);
+scene.add(ambient);
+
+const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+sun.position.set(18, 35, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -90;
+sun.shadow.camera.right = 90;
+sun.shadow.camera.top = 90;
+sun.shadow.camera.bottom = -90;
+sun.shadow.camera.near = 0.1;
+sun.shadow.camera.far = 120;
+scene.add(sun);
+
+// Ground
+const groundGeo = new THREE.PlaneGeometry(WORLD_SIZE * 2.2, WORLD_SIZE * 2.2, 1, 1);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x0d1726, roughness: 1.0, metalness: 0.0 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Simple border (visual)
+const border = new THREE.Mesh(
+  new THREE.RingGeometry(WORLD_SIZE * 1.01, WORLD_SIZE * 1.02, 128),
+  new THREE.MeshBasicMaterial({ color: 0x1c2a3a, transparent: true, opacity: 0.6 })
+);
+border.rotation.x = -Math.PI / 2;
+scene.add(border);
+
+/* -----------------------------
+   Mouse -> world point on y=0 plane
+----------------------------- */
+const raycaster = new THREE.Raycaster();
+const mouseNDC = new THREE.Vector2(0, 0);
+const planeY0 = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const mouseWorld = new THREE.Vector3(0, 0, 0);
+
+window.addEventListener("mousemove", (e) => {
+  mouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+});
+
+function updateMouseWorld() {
+  raycaster.setFromCamera(mouseNDC, camera);
+  raycaster.ray.intersectPlane(planeY0, mouseWorld);
+}
+
+/* -----------------------------
+   Helpers
+----------------------------- */
+const statsEl = document.getElementById("stats");
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function rand(a, b) { return a + Math.random() * (b - a); }
+function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+
+function inBoundsXZ(v) {
+  v.x = clamp(v.x, -WORLD_SIZE, WORLD_SIZE);
+  v.z = clamp(v.z, -WORLD_SIZE, WORLD_SIZE);
+  v.y = 0;
+  return v;
+}
+
+function dist2XZ(a, b) {
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
+  return dx*dx + dz*dz;
+}
+
+function globalSpeedMult(elapsedSec) {
+  return 1 + Math.min(RAMP_MAX, (elapsedSec / RAMP_SECS) * RAMP_MAX);
+}
+
+/* -----------------------------
+   Food as InstancedMesh
+----------------------------- */
+const foodGeo = new THREE.SphereGeometry(0.18, 12, 10);
+const foodMat = new THREE.MeshStandardMaterial({ color: 0x36d83a, roughness: 0.45, metalness: 0.05, emissive: 0x0b2a0c, emissiveIntensity: 0.7 });
+const foodMesh = new THREE.InstancedMesh(foodGeo, foodMat, FOOD_COUNT);
+foodMesh.castShadow = false;
+foodMesh.receiveShadow = false;
+scene.add(foodMesh);
+
+const foodPos = Array.from({ length: FOOD_COUNT }, () => new THREE.Vector3());
+const foodAlive = Array.from({ length: FOOD_COUNT }, () => true);
+const tmpMat4 = new THREE.Matrix4();
+const tmpPos = new THREE.Vector3();
+
+function respawnFood(i) {
+  foodPos[i].set(rand(-WORLD_SIZE, WORLD_SIZE), 0.18, rand(-WORLD_SIZE, WORLD_SIZE));
+  foodAlive[i] = true;
+}
+for (let i = 0; i < FOOD_COUNT; i++) respawnFood(i);
+
+function syncFoodInstances() {
+  for (let i = 0; i < FOOD_COUNT; i++) {
+    const p = foodPos[i];
+    tmpMat4.makeTranslation(p.x, p.y, p.z);
+    foodMesh.setMatrixAt(i, tmpMat4);
+  }
+  foodMesh.instanceMatrix.needsUpdate = true;
+}
+syncFoodInstances();
+
+/* -----------------------------
+   Snake class (InstancedMesh per snake)
+----------------------------- */
+const segGeo = new THREE.SphereGeometry(SEG_RADIUS, 14, 12);
+
+class Snake {
+  constructor({ isPlayer, color, baseSpeed, startPos, startLen }) {
+    this.isPlayer = isPlayer;
+    this.baseSpeed = baseSpeed;
+    this.color = color;
+    this.alive = true;
+
+    this.head = startPos.clone(); // Vector3 y=0
+    this.vel = new THREE.Vector3(0, 0, 0);
+
+    this.segments = [];
+    const L = clamp(startLen, 1, MAX_LEN);
+    for (let i = 0; i < L; i++) {
+      this.segments.push(startPos.clone().add(new THREE.Vector3(0, 0, i * SEG_SPACING)));
+    }
+
+    // AI steering
+    this.wander = rand(0, Math.PI * 2);
+    this.aiTarget = startPos.clone();
+    this.aiRetargetTimer = 0;
+
+    // visuals
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(color),
+      roughness: 0.38,
+      metalness: 0.08
+    });
+    this.mesh = new THREE.InstancedMesh(segGeo, mat, MAX_LEN);
+    this.mesh.castShadow = true;
+    this.mesh.receiveShadow = false;
+    scene.add(this.mesh);
+
+    this._syncMesh(true);
+  }
+
+  length() { return this.segments.length; }
+
+  grow(n) {
+    const add = Math.max(0, Math.floor(n));
+    for (let k = 0; k < add; k++) {
+      if (this.segments.length >= MAX_LEN) break;
+      const tail = this.segments[this.segments.length - 1];
+      this.segments.push(tail.clone());
+    }
+  }
+
+  currentSpeed(elapsedSec) {
+    const ramp = globalSpeedMult(elapsedSec);
+
+    // keep the “speed increases slightly over time” promise
+    // but prevent absurd control when extremely long
+    const longPenalty = 1 - Math.min(0.28, Math.max(0, this.length() - LONG_PENALTY_START) * LONG_PENALTY_PER_SEG);
+    return this.baseSpeed * ramp * longPenalty;
+  }
+
+  update(dt, elapsedSec) {
+    if (!this.alive) return;
+
+    const spd = this.currentSpeed(elapsedSec);
+
+    let dir = new THREE.Vector3(0, 0, 0);
+
+    if (this.isPlayer) {
+      updateMouseWorld();
+      dir.copy(mouseWorld).sub(this.head);
+      dir.y = 0;
+      if (dir.lengthSq() > 1e-6) dir.normalize();
+    } else {
+      // AI: wander + occasionally bias toward some nearby food
+      this.aiRetargetTimer -= dt;
+      if (this.aiRetargetTimer <= 0) {
+        this.aiRetargetTimer = rand(0.5, 1.2);
+        this.wander += rand(-0.9, 0.9);
+
+        // choose a "best" food among a random sample (fast)
+        let best = null;
+        let bestD = Infinity;
+        for (let s = 0; s < 18; s++) {
+          const idx = randInt(0, FOOD_COUNT - 1);
+          const p = foodPos[idx];
+          const d = dist2XZ(this.head, p);
+          if (d < bestD) { bestD = d; best = p; }
+        }
+        if (best) this.aiTarget.copy(best);
+        else this.aiTarget.set(rand(-WORLD_SIZE, WORLD_SIZE), 0, rand(-WORLD_SIZE, WORLD_SIZE));
+      }
+
+      const wdir = new THREE.Vector3(Math.cos(this.wander), 0, Math.sin(this.wander)).normalize();
+      const tdir = this.aiTarget.clone().sub(this.head); tdir.y = 0;
+      if (tdir.lengthSq() > 1e-6) tdir.normalize();
+
+      dir.copy(tdir).multiplyScalar(0.72).add(wdir.multiplyScalar(0.28));
+      if (dir.lengthSq() > 1e-6) dir.normalize();
+    }
+
+    // velocity smoothing
+    const targetVel = dir.multiplyScalar(spd);
+    this.vel.lerp(targetVel, TURN_SMOOTH);
+    this.head.addScaledVector(this.vel, dt);
+    inBoundsXZ(this.head);
+
+    // follow chain
+    this.segments[0].copy(this.head);
+
+    for (let i = 1; i < this.segments.length; i++) {
+      const prev = this.segments[i - 1];
+      const cur = this.segments[i];
+
+      tmpPos.copy(cur).sub(prev); // cur - prev
+      tmpPos.y = 0;
+      const d = tmpPos.length();
+      if (d < 1e-6) continue;
+
+      const desired = SEG_SPACING;
+      const pull = (d - desired) / d; // >0 if too far
+      cur.addScaledVector(tmpPos, -pull);
+      cur.y = 0;
+    }
+
+    this._syncMesh(false);
+  }
+
+  _syncMesh(force) {
+    // update instance matrices for active segments; hide unused
+    const L = this.segments.length;
+
+    for (let i = 0; i < L; i++) {
+      const p = this.segments[i];
+      const t = i / Math.max(1, L - 1);
+      const scale = 1.0 - t * 0.18; // taper tail a bit
+
+      tmpMat4.compose(
+        new THREE.Vector3(p.x, SEG_RADIUS, p.z),
+        new THREE.Quaternion(),
+        new THREE.Vector3(scale, scale, scale)
+      );
+      this.mesh.setMatrixAt(i, tmpMat4);
+    }
+
+    // Hide remaining instances by scaling near-zero
+    for (let i = L; i < MAX_LEN; i++) {
+      tmpMat4.compose(
+        new THREE.Vector3(0, -9999, 0),
+        new THREE.Quaternion(),
+        new THREE.Vector3(0.0001, 0.0001, 0.0001)
+      );
+      this.mesh.setMatrixAt(i, tmpMat4);
+    }
+
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (force) this.mesh.computeBoundingSphere();
+  }
+
+  destroy() {
+    this.alive = false;
+    scene.remove(this.mesh);
+    this.mesh.geometry.dispose();
+    // material shared? per-snake material, safe dispose:
+    this.mesh.material.dispose();
+  }
+}
+
+/* -----------------------------
+   Game state
+----------------------------- */
+let elapsed = 0;
+let dead = false;
+
+const snakes = [];
+const player = new Snake({
+  isPlayer: true,
+  color: 0x22d3ee,
+  baseSpeed: BASE_SPEED_PLAYER,
+  startPos: new THREE.Vector3(0, 0, 0),
+  startLen: 1
+});
+snakes.push(player);
+
+function spawnAI(len = randInt(6, 18)) {
+  const s = new Snake({
+    isPlayer: false,
+    color: new THREE.Color().setHSL(Math.random(), 0.75, 0.55).getHex(),
+    baseSpeed: BASE_SPEED_AI,
+    startPos: new THREE.Vector3(rand(-WORLD_SIZE, WORLD_SIZE), 0, rand(-WORLD_SIZE, WORLD_SIZE)),
+    startLen: len
+  });
+  snakes.push(s);
+  return s;
+}
+
+for (let i = 0; i < AI_TARGET; i++) spawnAI();
+
+/* -----------------------------
+   Food eating
+----------------------------- */
+function eatFoodForSnake(s) {
+  if (!s.alive) return;
+
+  // head only
+  for (let i = 0; i < FOOD_COUNT; i++) {
+    if (!foodAlive[i]) continue;
+    const p = foodPos[i];
+    if (dist2XZ(s.head, p) < (0.7 * 0.7)) {
+      foodAlive[i] = false;
+      respawnFood(i); // immediately respawn elsewhere
+      // modest growth
+      s.grow(s.isPlayer ? GROW_PLAYER : GROW_AI);
+    }
+  }
+  // update all food matrices once per frame elsewhere (fast enough)
+}
+
+/* -----------------------------
+   Combat (parallel)
+----------------------------- */
+function killSnake(s) {
+  if (!s.alive) return;
+  if (s === player) {
+    gameOver();
+    return;
+  }
+  s.destroy();
+}
+
+function bisectSnake(target, hitIndex) {
+  // only AI snakes are bisected in this prototype
+  if (target === player) { gameOver(); return; }
+
+  const segs = target.segments;
+  const left = segs.slice(0, hitIndex);
+  const right = segs.slice(hitIndex + 1);
+
+  // remove target
+  killSnake(target);
+
+  // spawn parts if long enough
+  const parts = [];
+  if (left.length >= 10) {
+    const s1 = new Snake({
+      isPlayer: false,
+      color: target.color,
+      baseSpeed: BASE_SPEED_AI,
+      startPos: left[0].clone(),
+      startLen: left.length
+    });
+    // overwrite segments for accuracy
+    s1.segments = left.map(v => v.clone());
+    s1.head.copy(s1.segments[0]);
+    s1._syncMesh(true);
+    snakes.push(s1);
+    parts.push(s1);
+  }
+
+  if (right.length >= 10) {
+    const s2 = new Snake({
+      isPlayer: false,
+      color: target.color,
+      baseSpeed: BASE_SPEED_AI,
+      startPos: right[0].clone(),
+      startLen: right.length
+    });
+    s2.segments = right.map(v => v.clone());
+    s2.head.copy(s2.segments[0]);
+    s2._syncMesh(true);
+    snakes.push(s2);
+    parts.push(s2);
+  }
+
+  // If both parts too small, it effectively “pops” and disappears (fine for now)
+  return parts;
+}
+
+function resolveAllCombat() {
+  const live = snakes.filter(s => s.alive);
+
+  // Prevent runaway: if too many snakes from bisections, trim oldest AIs
+  const aiLive = live.filter(s => !s.isPlayer);
+  if (aiLive.length > AI_TARGET + 10) {
+    // kill some smallest snakes first
+    aiLive.sort((a,b) => a.length() - b.length());
+    for (let i = 0; i < aiLive.length - (AI_TARGET + 10); i++) {
+      killSnake(aiLive[i]);
+    }
+  }
+
+  // Pairwise head-to-body checks
+  // To keep it fast, we sample every 2 segments on large snakes
+  for (let a = 0; a < live.length; a++) {
+    const attacker = live[a];
+    if (!attacker.alive) continue;
+
+    for (let t = 0; t < live.length; t++) {
+      if (a === t) continue;
+      const target = live[t];
+      if (!target.alive) continue;
+
+      // quick reject by head-to-head distance
+      if (dist2XZ(attacker.head, target.head) > (14 * 14)) continue;
+
+      const targetLen = target.length();
+      if (targetLen < 2) continue;
+
+      const step = targetLen > 140 ? 2 : 1;
+      const collideR = (COLLIDE_R + SEG_RADIUS) * (COLLIDE_R + SEG_RADIUS);
+
+      let hitIndex = -1;
+      for (let i = 1; i < targetLen; i += step) { // skip head index 0
+        if (dist2XZ(attacker.head, target.segments[i]) < collideR) {
+          hitIndex = i;
+          break;
+        }
+      }
+      if (hitIndex === -1) continue;
+
+      // RULE: larger target kills attacker
+      if (targetLen > attacker.length()) {
+        if (attacker === player) { gameOver(); return; }
+        killSnake(attacker);
+        break;
+      }
+
+      // target shorter/equal => cut or consume
+      const isMiddle = hitIndex >= MIDDLE_MARGIN && hitIndex <= (targetLen - 1 - MIDDLE_MARGIN);
+
+      if (isMiddle) {
+        bisectSnake(target, hitIndex);
+        attacker.grow(6);
+      } else {
+        // consume whole target
+        if (target === player) { gameOver(); return; }
+        killSnake(target);
+        attacker.grow(Math.max(2, Math.floor(targetLen * 0.18)));
+      }
+    }
+  }
+
+  // ensure AI count
+  const aiNow = snakes.filter(s => s.alive && !s.isPlayer).length;
+  while (aiNow + (snakes.filter(s => s.alive && !s.isPlayer).length - aiNow) < AI_TARGET) {
+    spawnAI();
+    if (snakes.filter(s => s.alive && !s.isPlayer).length >= AI_TARGET) break;
+  }
+}
+
+/* -----------------------------
+   Game over
+----------------------------- */
+function gameOver() {
+  if (dead) return;
+  dead = true;
+  setTimeout(() => {
+    alert("Game Over!");
+    location.reload();
+  }, 60);
+}
+
+/* -----------------------------
+   Camera follow
+----------------------------- */
+const camTarget = new THREE.Vector3();
+function updateCamera(dt) {
+  // angled follow
+  camTarget.copy(player.head);
+  const desiredPos = new THREE.Vector3(
+    camTarget.x + 0,
+    18,
+    camTarget.z + 20
+  );
+
+  // smooth follow
+  camera.position.lerp(desiredPos, 1 - Math.pow(0.0002, dt));
+  camera.lookAt(camTarget.x, 0, camTarget.z);
+}
+
+/* -----------------------------
+   Main loop
+----------------------------- */
+let last = performance.now();
+
+function tick(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  elapsed += dt;
+
+  if (!dead) {
+    // Update snakes
+    for (const s of snakes) {
+      if (s.alive) s.update(dt, elapsed);
+    }
+
+    // Eating
+    for (const s of snakes) {
+      if (s.alive) eatFoodForSnake(s);
+    }
+
+    // Combat
+    resolveAllCombat();
+
+    // Sync food instances once per frame
+    syncFoodInstances();
+
+    // Camera
+    updateCamera(dt);
+
+    // HUD
+    const rampPct = Math.round((globalSpeedMult(elapsed) - 1) * 100);
+    statsEl.innerHTML = `<b>Length:</b> ${player.length()} &nbsp; <b>Speed:</b> ${player.currentSpeed(elapsed).toFixed(2)} &nbsp; <b>Ramp:</b> +${rampPct}% &nbsp; <b>AI:</b> ${snakes.filter(s=>s.alive && !s.isPlayer).length}`;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+/* -----------------------------
+   Resize
+----------------------------- */
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+</body>
+</html>
