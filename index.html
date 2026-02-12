@@ -36,6 +36,8 @@ import * as THREE from "three";
    CONFIG
 ----------------------------- */
 const WORLD_SIZE = 90;
+const FOOD_SAMPLES_SWARM_EAT = 6;  // per swarm snake per frame
+const FOOD_SAMPLES_BIG_EAT   = 24; // per big snake per frame
 
 // Food
 const FOOD_COUNT = 900;
@@ -428,24 +430,31 @@ function promoteSwarmIndex(i){
    EAT FOOD
 ----------------------------- */
 function eatFoodBig(b){
-  // head-only
-  for (let i=0;i<FOOD_COUNT;i++){
-    if (dist2XZ(b.head, foodPos[i]) < (0.78*0.78)){
+  // sample a bunch instead of scanning all FOOD_COUNT
+  const eatR2 = (0.78 * 0.78);
+  for (let k = 0; k < FOOD_SAMPLES_BIG_EAT; k++){
+    const i = randInt(0, FOOD_COUNT - 1);
+    if (dist2XZ(b.head, foodPos[i]) < eatR2){
       respawnFood(i);
       b.grow(b.isPlayer ? 2 : 1);
+      break; // only eat 1 per frame
     }
   }
 }
 
+
 function eatFoodSwarm(s){
-  // head-only; swarm len grows slowly
-  for (let i=0;i<FOOD_COUNT;i++){
+  // sample a few foods instead of scanning all FOOD_COUNT
+  for (let k = 0; k < FOOD_SAMPLES_SWARM_EAT; k++){
+    const i = randInt(0, FOOD_COUNT - 1);
     if (dist2XZ(s.pos, foodPos[i]) < SWARM_EAT_RANGE2){
       respawnFood(i);
       s.len = clamp(s.len + 1, SWARM_MIN_LEN, SWARM_MAX_LEN);
+      break; // only eat 1 per frame
     }
   }
 }
+
 
 /* -----------------------------
    SWARM MOVEMENT
