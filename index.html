@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Snake Clash 3D – Swarm Mode (Three.js)</title>
+  <title>Snake Clash 3D – Finite Food, 50 Snakes, Speed Ramp</title>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0f14; }
     canvas { display: block; }
@@ -16,62 +16,74 @@
   </style>
 
   <script type="importmap">
-    {
-      "imports": {
-        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
-      }
-    }
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
   </script>
 </head>
 <body>
   <div class="hud">
-    Move mouse • 500 swarm snakes • Eat dots • Eat each other • Middle-hit cuts into half-snake + dots<br/>
+    Move mouse • 50 snakes • Finite food (no respawn) • Speed ramps up • Long snakes slightly slower • Mid-hit splits<br/>
     <span id="stats"></span>
   </div>
 
 <script type="module">
 import * as THREE from "three";
 
-/* -----------------------------
-   CONFIG
------------------------------ */
+/* =========================
+   TUNABLE SETTINGS
+========================= */
 const WORLD_SIZE = 90;
-const FOOD_SAMPLES_SWARM_EAT = 6;  // per swarm snake per frame
-const FOOD_SAMPLES_BIG_EAT   = 24; // per big snake per frame
 
-// Food
-const FOOD_COUNT = 900;
+// Finite food (no respawn). Make small to force competition.
+const FOOD_COUNT = 180;
 
-// Swarm (small snakes)
-const SWARM_COUNT = 500;                 // << your “50x more” starts here
-const SWARM_BASE_SPEED = 7.2;
-const SWARM_MIN_LEN = 1;
-const SWARM_MAX_LEN = 260;               // logical length for swarm snakes
-const SWARM_EAT_RANGE2 = 0.85 * 0.85;
+// 50 real snakes from the start
+const AI_COUNT = 50;
 
-// Promote big snakes (rendered as segments)
-const PROMOTE_LEN = 30;                  // when swarm gets >= this, it becomes a big segmented snake
-const BIG_MAX = 35;                      // cap number of big snakes (performance)
-const BIG_MAX_LEN = 520;                 // segment cap
+// Snakes can get huge logically…
+const MAX_LOGICAL_LEN = 8000;
+
+// …but we cap the simulated body points for performance.
+// Logical length can grow beyond PHYS_MAX; the “extra tail” is virtual.
+const PHYS_MAX = 900;
+
+// Rendering instances per snake (downsample tail beyond this)
+const RENDER_MAX = 900;
+
 const SEG_SPACING = 0.65;
 const SEG_RADIUS  = 0.33;
 
-// Combat / cut behavior
-const MIDDLE_MARGIN = 8;                 // middle definition for big snakes
-const CUT_MIN_KEEP = 2;                  // KEEP even tiny half-snakes (fixes “disappearing”)
-const DOT_DROP_CUT_FACTOR = 0.75;
-const DOT_DROP_EAT_FACTOR = 0.55;
+// Speed model:
+// - game speeds up over time (no cap)
+// - longer snakes slightly slower
+const BASE_SPEED_PLAYER = 8.2;
+const BASE_SPEED_AI     = 7.6;
 
-// Speed ramp (slight, but visible)
-const RAMP_MAX = 0.18;
-const RAMP_SECS = 140;
+// Overall game speed multiplier increases steadily
+const RAMP_PER_SEC = 0.0018;        // ~+10% per minute
+const RAMP_MAX = 1.75;              // safety cap (still gets very fast)
 
-// If you want it even more chaotic, raise these:
-const EXTRA_SPAWNS_PER_MIN = 0;          // keep 0 for now; swarm already huge
+// Long snake penalty (slight)
+const LONG_PENALTY_START = 120;
+const LONG_PENALTY_PER_SEG = 0.00045; // small: 1000 extra seg => ~40% slower
 
-/* -----------------------------
+// Food eat range
+const FOOD_EAT_R2 = 0.80 * 0.80;
+
+// Growth from food (higher because food is scarce)
+const GROW_FROM_FOOD_PLAYER = 10;
+const GROW_FROM_FOOD_AI     = 8;
+
+// Combat
+const HEAD_BODY_R2 = 0.86 * 0.86;
+const MIDDLE_MARGIN = 14;  // stricter “middle” so splits feel intentional
+
+// When you fully eat a snake, you gain its full length
+// When you split a smaller snake in the middle, you gain the tail half length
+const MAX_TOTAL_SNAKES = 90; // splits can increase count; keep bounded
+
+/* =========================
    THREE SETUP
------------------------------ */
+========================= */
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -80,23 +92,23 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0b0f14, 50, 260);
+scene.fog = new THREE.Fog(0x0b0f14, 55, 260);
 
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 600);
-camera.position.set(0, 20, 24);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 700);
+camera.position.set(0, 20, 26);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 
 const sun = new THREE.DirectionalLight(0xffffff, 0.95);
-sun.position.set(22, 40, 14);
+sun.position.set(22, 44, 14);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -120;
-sun.shadow.camera.right = 120;
-sun.shadow.camera.top = 120;
-sun.shadow.camera.bottom = -120;
+sun.shadow.camera.left = -140;
+sun.shadow.camera.right = 140;
+sun.shadow.camera.top = 140;
+sun.shadow.camera.bottom = -140;
 sun.shadow.camera.near = 0.1;
-sun.shadow.camera.far = 200;
+sun.shadow.camera.far = 240;
 scene.add(sun);
 
 // Ground
@@ -116,9 +128,9 @@ const border = new THREE.Mesh(
 border.rotation.x = -Math.PI / 2;
 scene.add(border);
 
-/* -----------------------------
+/* =========================
    MOUSE -> WORLD POINT (y=0)
------------------------------ */
+========================= */
 const raycaster = new THREE.Raycaster();
 const mouseNDC = new THREE.Vector2(0, 0);
 const planeY0 = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -134,14 +146,15 @@ function updateMouseWorld() {
   raycaster.ray.intersectPlane(planeY0, mouseWorld);
 }
 
-/* -----------------------------
+/* =========================
    HELPERS
------------------------------ */
+========================= */
 const statsEl = document.getElementById("stats");
 const tmpMat4 = new THREE.Matrix4();
 const tmpPos = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
 const tmpScale = new THREE.Vector3();
+const tmpVec = new THREE.Vector3();
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function rand(a, b) { return a + Math.random() * (b - a); }
@@ -161,12 +174,14 @@ function dist2XZ(a, b) {
 }
 
 function globalSpeedMult(elapsedSec) {
-  return 1 + Math.min(RAMP_MAX, (elapsedSec / RAMP_SECS) * RAMP_MAX);
+  // Grows steadily but capped as a safety guard.
+  // Feel free to raise RAMP_MAX if you want it to get insane.
+  return Math.min(RAMP_MAX, 1 + elapsedSec * RAMP_PER_SEC);
 }
 
-/* -----------------------------
-   FOOD (Instanced)
------------------------------ */
+/* =========================
+   FOOD (FINITE)
+========================= */
 const foodGeo = new THREE.SphereGeometry(0.18, 12, 10);
 const foodMat = new THREE.MeshStandardMaterial({
   color: 0x36d83a, roughness: 0.45, metalness: 0.05,
@@ -176,134 +191,105 @@ const foodMesh = new THREE.InstancedMesh(foodGeo, foodMat, FOOD_COUNT);
 scene.add(foodMesh);
 
 const foodPos = Array.from({ length: FOOD_COUNT }, () => new THREE.Vector3());
+const foodAlive = Array.from({ length: FOOD_COUNT }, () => true);
 
-function respawnFood(i, near=null) {
-  if (near) {
-    foodPos[i].set(
-      clamp(near.x + rand(-2.7, 2.7), -WORLD_SIZE, WORLD_SIZE),
-      0.18,
-      clamp(near.z + rand(-2.7, 2.7), -WORLD_SIZE, WORLD_SIZE)
-    );
-  } else {
-    foodPos[i].set(rand(-WORLD_SIZE, WORLD_SIZE), 0.18, rand(-WORLD_SIZE, WORLD_SIZE));
-  }
+function spawnFood(i) {
+  foodPos[i].set(rand(-WORLD_SIZE, WORLD_SIZE), 0.18, rand(-WORLD_SIZE, WORLD_SIZE));
+  foodAlive[i] = true;
 }
+for (let i = 0; i < FOOD_COUNT; i++) spawnFood(i);
 
-for (let i = 0; i < FOOD_COUNT; i++) respawnFood(i);
-
-function syncFood() {
+function syncFoodInstances() {
   for (let i = 0; i < FOOD_COUNT; i++) {
+    if (!foodAlive[i]) {
+      tmpMat4.makeTranslation(0, -9999, 0);
+      foodMesh.setMatrixAt(i, tmpMat4);
+      continue;
+    }
     const p = foodPos[i];
     tmpMat4.makeTranslation(p.x, p.y, p.z);
     foodMesh.setMatrixAt(i, tmpMat4);
   }
   foodMesh.instanceMatrix.needsUpdate = true;
 }
-syncFood();
+syncFoodInstances();
 
-function dropDotsFromPositions(positions, factor) {
-  if (!positions || positions.length === 0) return;
-  const n = clamp(Math.floor(positions.length * factor), 6, 220);
-  for (let k = 0; k < n; k++) {
-    const fi = randInt(0, FOOD_COUNT - 1);
-    const p = positions[randInt(0, positions.length - 1)];
-    respawnFood(fi, p);
-  }
-}
-
-/* -----------------------------
-   SWARM SNAKES (single instanced sphere each)
-   - fast for 500+
------------------------------ */
-const swarmGeo = new THREE.SphereGeometry(0.25, 10, 9);
-const swarmMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.55, metalness: 0.06 });
-const swarmMesh = new THREE.InstancedMesh(swarmGeo, swarmMat, SWARM_COUNT);
-swarmMesh.castShadow = true;
-scene.add(swarmMesh);
-
-const swarm = Array.from({ length: SWARM_COUNT }, () => ({
-  alive: true,
-  pos: new THREE.Vector3(rand(-WORLD_SIZE, WORLD_SIZE), 0, rand(-WORLD_SIZE, WORLD_SIZE)),
-  vel: new THREE.Vector3(0, 0, 0),
-  len: randInt(1, 6),
-  wander: rand(0, Math.PI*2),
-  hue: Math.random()
-}));
-
-function syncSwarm() {
-  for (let i = 0; i < SWARM_COUNT; i++) {
-    const s = swarm[i];
-    if (!s.alive) {
-      tmpMat4.compose(new THREE.Vector3(0, -9999, 0), tmpQuat, new THREE.Vector3(0.001,0.001,0.001));
-      swarmMesh.setMatrixAt(i, tmpMat4);
-      continue;
-    }
-    // size grows a bit with length
-    const r = 0.20 + Math.min(0.22, s.len * 0.0045);
-    tmpPos.set(s.pos.x, r, s.pos.z);
-    tmpScale.set(r/0.25, r/0.25, r/0.25);
-    tmpMat4.compose(tmpPos, tmpQuat, tmpScale);
-    swarmMesh.setMatrixAt(i, tmpMat4);
-  }
-  swarmMesh.instanceMatrix.needsUpdate = true;
-}
-
-/* -----------------------------
-   BIG SNAKES (segmented instanced mesh per snake)
-   - limited count for performance
------------------------------ */
+/* =========================
+   SNAKE
+========================= */
 const segGeo = new THREE.SphereGeometry(SEG_RADIUS, 14, 12);
 
-class BigSnake {
+class Snake {
   constructor({ isPlayer, colorHex, baseSpeed, startPos, startLen }) {
     this.isPlayer = isPlayer;
-    this.baseSpeed = baseSpeed;
     this.colorHex = colorHex;
+    this.baseSpeed = baseSpeed;
     this.alive = true;
 
     this.head = startPos.clone();
     this.vel = new THREE.Vector3(0,0,0);
-    this.segments = [];
-    const L = clamp(startLen, 1, BIG_MAX_LEN);
 
-    for (let i=0;i<L;i++) {
+    // physical segments positions (capped)
+    this.segments = [];
+    // logical length can grow huge (affects speed penalty, combat comparisons, etc.)
+    this.logicalLen = clamp(startLen, 1, MAX_LOGICAL_LEN);
+
+    const initialPhys = Math.min(PHYS_MAX, this.logicalLen);
+    for (let i = 0; i < initialPhys; i++) {
       this.segments.push(startPos.clone().add(new THREE.Vector3(0,0,i*SEG_SPACING)));
     }
 
-    this.wander = rand(0, Math.PI*2);
+    // AI steering
+    this.wander = rand(0, Math.PI * 2);
     this.aiTarget = startPos.clone();
     this.aiTimer = 0;
 
+    // visuals (InstancedMesh per snake, but only RENDER_MAX instances)
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(colorHex),
       roughness: 0.38,
       metalness: 0.08
     });
-    this.mesh = new THREE.InstancedMesh(segGeo, mat, BIG_MAX_LEN);
+    this.mesh = new THREE.InstancedMesh(segGeo, mat, RENDER_MAX);
     this.mesh.castShadow = true;
     scene.add(this.mesh);
+
     this.sync(true);
   }
 
-  length(){ return this.segments.length; }
+  length() { return this.logicalLen; }
+  physLen() { return this.segments.length; }
 
-  currentSpeed(elapsed){
-    return this.baseSpeed * globalSpeedMult(elapsed);
-  }
-
-  grow(n){
+  grow(n) {
     const add = Math.max(0, Math.floor(n));
-    for (let k=0;k<add;k++){
-      if (this.segments.length >= BIG_MAX_LEN) break;
-      this.segments.push(this.segments[this.segments.length-1].clone());
+    if (add === 0) return;
+
+    this.logicalLen = clamp(this.logicalLen + add, 1, MAX_LOGICAL_LEN);
+
+    // Only add physical points until PHYS_MAX
+    for (let k = 0; k < add; k++) {
+      if (this.segments.length >= PHYS_MAX) break;
+      const tail = this.segments[this.segments.length - 1];
+      this.segments.push(tail.clone());
     }
   }
 
-  update(dt, elapsed){
+  currentSpeed(elapsedSec) {
+    const ramp = globalSpeedMult(elapsedSec);
+
+    // Slight slowdown for long snakes
+    const over = Math.max(0, this.logicalLen - LONG_PENALTY_START);
+    const penalty = 1 - Math.min(0.55, over * LONG_PENALTY_PER_SEG);
+
+    return this.baseSpeed * ramp * penalty;
+  }
+
+  update(dt, elapsedSec) {
     if (!this.alive) return;
 
-    const spd = this.currentSpeed(elapsed);
-    let dir = new THREE.Vector3(0,0,0);
+    const spd = this.currentSpeed(elapsedSec);
+
+    let dir = tmpVec.set(0,0,0);
 
     if (this.isPlayer) {
       updateMouseWorld();
@@ -311,450 +297,390 @@ class BigSnake {
       dir.y = 0;
       if (dir.lengthSq() > 1e-6) dir.normalize();
     } else {
+      // AI targets remaining food; when food is gone, it chases the player area (more jeopardy)
       this.aiTimer -= dt;
-      if (this.aiTimer <= 0){
-        this.aiTimer = rand(0.5, 1.1);
+      if (this.aiTimer <= 0) {
+        this.aiTimer = rand(0.45, 1.05);
         this.wander += rand(-0.9, 0.9);
 
-        // chase random food sample (fast)
-        let best = null, bestD = Infinity;
-        for (let s=0;s<22;s++){
-          const idx = randInt(0, FOOD_COUNT-1);
+        // Pick nearest alive food from a sample (cheap)
+        let best = null;
+        let bestD = Infinity;
+        for (let s = 0; s < 22; s++) {
+          const idx = randInt(0, FOOD_COUNT - 1);
+          if (!foodAlive[idx]) continue;
           const p = foodPos[idx];
           const d = dist2XZ(this.head, p);
-          if (d < bestD){ bestD = d; best = p; }
+          if (d < bestD) { bestD = d; best = p; }
         }
-        if (best) this.aiTarget.copy(best);
+
+        if (best) {
+          this.aiTarget.copy(best);
+        } else {
+          // No food left: drift towards player + wander
+          this.aiTarget.set(
+            clamp(player.head.x + rand(-18, 18), -WORLD_SIZE, WORLD_SIZE),
+            0,
+            clamp(player.head.z + rand(-18, 18), -WORLD_SIZE, WORLD_SIZE)
+          );
+        }
       }
 
-      const wdir = new THREE.Vector3(Math.cos(this.wander), 0, Math.sin(this.wander)).normalize();
+      const wdir = tmpVec.set(Math.cos(this.wander), 0, Math.sin(this.wander)).normalize();
       const tdir = this.aiTarget.clone().sub(this.head); tdir.y = 0;
       if (tdir.lengthSq() > 1e-6) tdir.normalize();
 
-      dir.copy(tdir).multiplyScalar(0.72).add(wdir.multiplyScalar(0.28));
+      dir = tdir.multiplyScalar(0.74).add(wdir.multiplyScalar(0.26));
       if (dir.lengthSq() > 1e-6) dir.normalize();
     }
 
-    // smooth velocity
+    // velocity smoothing
     const targetVel = dir.multiplyScalar(spd);
     this.vel.lerp(targetVel, 0.14);
+
     this.head.addScaledVector(this.vel, dt);
     inBoundsXZ(this.head);
 
-    // follow
+    // follow chain (only physical points)
     this.segments[0].copy(this.head);
-    for (let i=1;i<this.segments.length;i++){
-      const prev = this.segments[i-1];
-      const cur  = this.segments[i];
 
-      tmpPos.copy(cur).sub(prev); tmpPos.y = 0;
-      const d = tmpPos.length();
+    for (let i = 1; i < this.segments.length; i++) {
+      const prev = this.segments[i - 1];
+      const cur = this.segments[i];
+
+      tmpVec.copy(cur).sub(prev);
+      tmpVec.y = 0;
+      const d = tmpVec.length();
       if (d < 1e-6) continue;
+
       const pull = (d - SEG_SPACING) / d;
-      cur.addScaledVector(tmpPos, -pull);
+      cur.addScaledVector(tmpVec, -pull);
       cur.y = 0;
     }
 
     this.sync(false);
   }
 
-  sync(force){
+  // Tail LOD: render dense head, downsample tail to fit RENDER_MAX.
+  sync(force) {
     const L = this.segments.length;
-    for (let i=0;i<L;i++){
-      const p = this.segments[i];
-      const t = i / Math.max(1, L-1);
-      const s = 1.0 - t*0.18;
+
+    const indices = [];
+    const headDense = Math.min(260, L);
+    for (let i = 0; i < headDense; i++) indices.push(i);
+
+    let i = headDense;
+    let step = 2;
+    while (i < L && indices.length < RENDER_MAX) {
+      indices.push(i);
+      i += step;
+      if (i > 650) step = 3;
+      if (i > 1200) step = 4;
+      if (i > 2400) step = 6;
+    }
+
+    // write instances
+    for (let k = 0; k < indices.length; k++) {
+      const segIndex = indices[k];
+      const p = this.segments[segIndex];
+
+      const t = segIndex / Math.max(1, L - 1);
+      const s = 1.0 - t * 0.22;
 
       tmpPos.set(p.x, SEG_RADIUS, p.z);
-      tmpScale.set(s,s,s);
+      tmpScale.set(s, s, s);
       tmpMat4.compose(tmpPos, tmpQuat, tmpScale);
-      this.mesh.setMatrixAt(i, tmpMat4);
+      this.mesh.setMatrixAt(k, tmpMat4);
     }
-    for (let i=L;i<BIG_MAX_LEN;i++){
-      tmpMat4.compose(new THREE.Vector3(0,-9999,0), tmpQuat, new THREE.Vector3(0.001,0.001,0.001));
-      this.mesh.setMatrixAt(i, tmpMat4);
+
+    // hide remaining
+    for (let k = indices.length; k < RENDER_MAX; k++) {
+      tmpMat4.compose(new THREE.Vector3(0, -9999, 0), tmpQuat, new THREE.Vector3(0.001,0.001,0.001));
+      this.mesh.setMatrixAt(k, tmpMat4);
     }
+
     this.mesh.instanceMatrix.needsUpdate = true;
     if (force) this.mesh.computeBoundingSphere();
   }
 
-  destroy(){
-  this.alive = false;
-  scene.remove(this.mesh);
-
-  // IMPORTANT: do NOT dispose geometry here because it is shared (segGeo).
-  // Disposing it will break all other snakes and can freeze the game.
-  this.mesh.material.dispose();
-}
+  destroy() {
+    this.alive = false;
+    scene.remove(this.mesh);
+    // IMPORTANT: segGeo is shared; do NOT dispose geometry here.
+    this.mesh.material.dispose();
+  }
 }
 
-/* -----------------------------
-   PLAYER (Big snake, starts as dot)
------------------------------ */
+/* =========================
+   GAME STATE
+========================= */
 let elapsed = 0;
 let dead = false;
 
-const bigSnakes = [];
-const player = new BigSnake({
+const snakes = [];
+
+const player = new Snake({
   isPlayer: true,
   colorHex: 0x22d3ee,
-  baseSpeed: 8.0,
-  startPos: new THREE.Vector3(0,0,0),
+  baseSpeed: BASE_SPEED_PLAYER,
+  startPos: new THREE.Vector3(0, 0, 0),
   startLen: 1
 });
-bigSnakes.push(player);
+snakes.push(player);
 
-/* -----------------------------
-   Promote swarm snakes into big snakes
------------------------------ */
-function promoteSwarmIndex(i){
-  const s = swarm[i];
-  if (!s.alive) return false;
-  if (bigSnakes.filter(x=>x.alive && !x.isPlayer).length >= BIG_MAX) return false;
-
-  const color = new THREE.Color().setHSL(s.hue, 0.78, 0.55).getHex();
-  const bs = new BigSnake({
+function spawnAI(len = randInt(8, 22)) {
+  const s = new Snake({
     isPlayer: false,
-    colorHex: color,
-    baseSpeed: 7.4 * (1 + Math.min(0.10, (s.len-30)*0.0015)),
-    startPos: s.pos.clone(),
-    startLen: Math.min(BIG_MAX_LEN, Math.max(10, s.len))
+    colorHex: new THREE.Color().setHSL(Math.random(), 0.78, 0.55).getHex(),
+    baseSpeed: BASE_SPEED_AI * rand(0.98, 1.04),
+    startPos: new THREE.Vector3(rand(-WORLD_SIZE, WORLD_SIZE), 0, rand(-WORLD_SIZE, WORLD_SIZE)),
+    startLen: len
   });
-  bigSnakes.push(bs);
-
-  // remove swarm snake
-  s.alive = false;
-  s.len = 0;
-  return true;
+  snakes.push(s);
+  return s;
 }
 
-/* -----------------------------
-   EAT FOOD
------------------------------ */
-function eatFoodBig(b){
-  // sample a bunch instead of scanning all FOOD_COUNT
-  const eatR2 = (0.78 * 0.78);
-  for (let k = 0; k < FOOD_SAMPLES_BIG_EAT; k++){
+for (let i = 0; i < AI_COUNT; i++) spawnAI();
+
+/* =========================
+   FOOD EATING (FINITE)
+========================= */
+function eatFood(s) {
+  if (!s.alive) return;
+
+  // sample instead of scanning everything (performance)
+  // when food is scarce, sampling still works because snakes are moving everywhere
+  const samples = 22;
+
+  for (let k = 0; k < samples; k++) {
     const i = randInt(0, FOOD_COUNT - 1);
-    if (dist2XZ(b.head, foodPos[i]) < eatR2){
-      respawnFood(i);
-      b.grow(b.isPlayer ? 2 : 1);
-      break; // only eat 1 per frame
+    if (!foodAlive[i]) continue;
+
+    if (dist2XZ(s.head, foodPos[i]) < FOOD_EAT_R2) {
+      foodAlive[i] = false;
+
+      // growth is chunky because food is finite
+      s.grow(s.isPlayer ? GROW_FROM_FOOD_PLAYER : GROW_FROM_FOOD_AI);
+      break;
     }
   }
 }
 
-
-function eatFoodSwarm(s){
-  // sample a few foods instead of scanning all FOOD_COUNT
-  for (let k = 0; k < FOOD_SAMPLES_SWARM_EAT; k++){
-    const i = randInt(0, FOOD_COUNT - 1);
-    if (dist2XZ(s.pos, foodPos[i]) < SWARM_EAT_RANGE2){
-      respawnFood(i);
-      s.len = clamp(s.len + 1, SWARM_MIN_LEN, SWARM_MAX_LEN);
-      break; // only eat 1 per frame
-    }
-  }
-}
-
-
-/* -----------------------------
-   SWARM MOVEMENT
------------------------------ */
-function updateSwarm(dt){
-  const mult = globalSpeedMult(elapsed);
-
-  // simple behavior: wander + chase a random food sample
-  for (let i=0;i<SWARM_COUNT;i++){
-    const s = swarm[i];
-    if (!s.alive) continue;
-
-    s.wander += rand(-1.1, 1.1) * dt;
-
-    // food sample chase (cheap)
-    let best = null, bestD = Infinity;
-    for (let k=0;k<10;k++){
-      const fi = randInt(0, FOOD_COUNT-1);
-      const p = foodPos[fi];
-      const d = dist2XZ(s.pos, p);
-      if (d < bestD){ bestD = d; best = p; }
-    }
-
-    const wdir = new THREE.Vector3(Math.cos(s.wander), 0, Math.sin(s.wander)).normalize();
-    const tdir = best ? best.clone().sub(s.pos) : new THREE.Vector3(0,0,0);
-    tdir.y = 0;
-    if (tdir.lengthSq() > 1e-6) tdir.normalize();
-
-    const dir = tdir.multiplyScalar(0.70).add(wdir.multiplyScalar(0.30));
-    if (dir.lengthSq() > 1e-6) dir.normalize();
-
-    const spd = SWARM_BASE_SPEED * mult * (1 - Math.min(0.22, Math.max(0, s.len-120)*0.0018));
-    const targetVel = dir.multiplyScalar(spd);
-    s.vel.lerp(targetVel, 0.14);
-
-    s.pos.addScaledVector(s.vel, dt);
-    inBoundsXZ(s.pos);
-  }
-}
-
-/* -----------------------------
-   SWARM vs SWARM COMBAT (parallel)
-   Rule: if your head touches someone and they are longer, you die; else you eat them (gain full length).
------------------------------ */
-function resolveSwarmCombat(){
-  // To keep it fast with 500 snakes, we do a random pairing sample per frame.
-  // This still creates LOTS of eating over time.
-  const checks = 1400; // increase for more chaos, but too high hurts fps
-
-  for (let c=0;c<checks;c++){
-    const a = randInt(0, SWARM_COUNT-1);
-    const b = randInt(0, SWARM_COUNT-1);
-    if (a === b) continue;
-
-    const sa = swarm[a], sb = swarm[b];
-    if (!sa.alive || !sb.alive) continue;
-
-    // collision radius grows with len
-    const ra = 0.30 + Math.min(0.40, sa.len * 0.004);
-    const rb = 0.30 + Math.min(0.40, sb.len * 0.004);
-    const r2 = (ra + rb) * (ra + rb);
-
-    if (dist2XZ(sa.pos, sb.pos) > r2) continue;
-
-    if (sb.len > sa.len){
-      // a dies
-      sa.alive = false;
-      // drop dots from its “body” (simulate)
-      dropDotsFromPositions([sa.pos], 0.9);
-    } else {
-      // a eats b
-      sa.len = clamp(sa.len + sb.len, SWARM_MIN_LEN, SWARM_MAX_LEN);
-      sb.alive = false;
-      dropDotsFromPositions([sb.pos], 0.9);
-    }
-  }
-}
-
-/* -----------------------------
-   BIG SNAKE COMBAT (parallel) – FIXES “DISAPPEAR”
-   - prevents double-processing in same frame
-   - mid-cut ALWAYS keeps a half snake (even tiny)
-   - eating adds FULL length
------------------------------ */
-function gameOver(){
+/* =========================
+   COMBAT (parallel)
+   Rules:
+   - attacker head hits target body:
+     - if target longer => attacker dies
+     - else if hit in middle => target splits into 2 snakes (head half + tail half)
+       attacker gains tail half length
+     - else => target is fully eaten
+       attacker gains full target length
+========================= */
+function gameOver() {
   if (dead) return;
   dead = true;
-  setTimeout(()=>{ alert("Game Over!"); location.reload(); }, 60);
+  setTimeout(() => { alert("Game Over!"); location.reload(); }, 60);
 }
 
-function dropDotsFromBigSegments(segments, factor){
-  dropDotsFromPositions(segments, factor);
+function killSnake(s) {
+  if (!s.alive) return;
+  if (s === player) { gameOver(); return; }
+  s.destroy();
 }
 
-function eatOrCutBig(attacker, target, hitIndex){
-  const targetLenBefore = target.length();
+function trimSnakeCountIfNeeded() {
+  const liveAI = snakes.filter(s => s.alive && !s.isPlayer);
+  if (liveAI.length <= MAX_TOTAL_SNAKES) return;
 
-  if (targetLenBefore > attacker.length()){
-    if (attacker === player) gameOver();
-    else attacker.destroy();
-    return;
+  // remove smallest AIs first
+  liveAI.sort((a,b) => a.length() - b.length());
+  const removeCount = liveAI.length - MAX_TOTAL_SNAKES;
+  for (let i = 0; i < removeCount; i++) killSnake(liveAI[i]);
+}
+
+function splitSnake(target, hitIndex) {
+  // Split target into head-half and tail-half snakes
+  // Keep mass: both halves remain as snakes.
+  const totalLen = target.length();
+
+  // Map hitIndex from physical segments into “logical length” space.
+  // If target is longer logically than physically, hitIndex still refers to the front part.
+  const physLen = target.physLen();
+  const ratio = physLen > 1 ? (hitIndex / (physLen - 1)) : 0.5;
+  const logicalAtHit = Math.max(1, Math.floor(ratio * totalLen));
+
+  const headLen = clamp(logicalAtHit, 1, totalLen - 1);
+  const tailLen = totalLen - headLen;
+
+  // Build tail snake using the tail physical points we have (or reuse last point if virtual)
+  const tailStartPos = target.segments[Math.min(hitIndex + 1, physLen - 1)].clone();
+
+  // Reduce target to headLen
+  target.logicalLen = headLen;
+  // Reduce physical points too (keep at least 2)
+  const newPhys = Math.max(2, Math.min(PHYS_MAX, Math.min(target.segments.length, Math.max(2, hitIndex))));
+  target.segments = target.segments.slice(0, newPhys).map(v => v.clone());
+  target.head.copy(target.segments[0]);
+  target.sync(true);
+
+  // Create new snake as tail half
+  const tailSnake = new Snake({
+    isPlayer: false,
+    colorHex: target.colorHex,
+    baseSpeed: target.baseSpeed * rand(0.99, 1.03),
+    startPos: tailStartPos,
+    startLen: Math.max(2, Math.min(200, tailLen)) // physical init
+  });
+  // Set logical length to full tailLen (can be huge)
+  tailSnake.logicalLen = tailLen;
+
+  // Seed tail snake segments behind start
+  const initPhys = Math.min(PHYS_MAX, Math.max(2, Math.min(tailSnake.segments.length, tailLen)));
+  tailSnake.segments = [];
+  for (let i = 0; i < initPhys; i++) {
+    tailSnake.segments.push(tailStartPos.clone().add(new THREE.Vector3(0,0,i*SEG_SPACING)));
   }
+  tailSnake.head.copy(tailSnake.segments[0]);
+  tailSnake.sync(true);
 
-  const isMiddle = hitIndex >= MIDDLE_MARGIN && hitIndex <= (targetLenBefore - 1 - MIDDLE_MARGIN);
+  snakes.push(tailSnake);
 
-  if (isMiddle){
-    // Keep head half as snake, tail half becomes dots
-    const headHalf = target.segments.slice(0, hitIndex);
-    const tailHalf = target.segments.slice(hitIndex + 1);
-
-    dropDotsFromBigSegments(tailHalf, DOT_DROP_CUT_FACTOR);
-
-    // KEEP even tiny half-snakes (fix #2)
-    if (headHalf.length < CUT_MIN_KEEP){
-      // if absurdly tiny, just keep 1-2 segments
-      const kept = target.segments.slice(0, CUT_MIN_KEEP);
-      target.segments = kept.map(v=>v.clone());
-    } else {
-      target.segments = headHalf.map(v=>v.clone());
-    }
-
-    target.head.copy(target.segments[0]);
-    target.sync(true);
-
-    // attacker gains the CUT OFF portion length (feels fair)
-    const gained = Math.max(1, targetLenBefore - hitIndex);
-    attacker.grow(gained);
-
-  } else {
-    // Fully eaten: attacker gains FULL length (fix #3)
-    const gained = targetLenBefore;
-    dropDotsFromBigSegments(target.segments, DOT_DROP_EAT_FACTOR);
-
-    if (target === player) gameOver();
-    else target.destroy();
-
-    attacker.grow(gained);
-  }
+  return { headLen, tailLen, tailSnake };
 }
 
-function resolveBigCombat(){
-  const live = bigSnakes.filter(s=>s.alive);
-  const processed = new Set(); // targets acted on this frame (prevents vanish/double hits)
+function resolveCombat() {
+  const live = snakes.filter(s => s.alive);
 
-  for (let a=0;a<live.length;a++){
+  // prevent multi-processing the same target in one frame
+  const processedTargets = new Set();
+
+  for (let a = 0; a < live.length; a++) {
     const attacker = live[a];
     if (!attacker.alive) continue;
 
-    for (let t=0;t<live.length;t++){
-      if (a===t) continue;
+    for (let t = 0; t < live.length; t++) {
+      if (a === t) continue;
       const target = live[t];
       if (!target.alive) continue;
-      if (processed.has(target)) continue;
+      if (processedTargets.has(target)) continue;
 
       // quick reject
-      if (dist2XZ(attacker.head, target.head) > (18*18)) continue;
+      if (dist2XZ(attacker.head, target.head) > (18 * 18)) continue;
 
-      // check attacker head vs target body
+      // head vs body check on target's physical segments
+      const tPhys = target.physLen();
+      if (tPhys < 3) continue;
+
       let hitIndex = -1;
-      const step = target.length() > 180 ? 2 : 1;
-      for (let i=1;i<target.length();i+=step){
-        if (dist2XZ(attacker.head, target.segments[i]) < (0.85*0.85)){
+      const step = tPhys > 220 ? 2 : 1;
+
+      for (let i = 1; i < tPhys; i += step) { // skip head
+        if (dist2XZ(attacker.head, target.segments[i]) < HEAD_BODY_R2) {
           hitIndex = i;
           break;
         }
       }
       if (hitIndex === -1) continue;
 
-      processed.add(target);
-      eatOrCutBig(attacker, target, hitIndex);
-      break; // attacker only resolves one target per frame (stability)
-    }
-  }
-}
+      // resolve one target per attacker per frame (stability)
+      processedTargets.add(target);
 
-/* -----------------------------
-   Swarm interacts with big snakes (jeopardy)
-   - swarm can nibble big snakes if huge, big snakes can eat swarm
------------------------------ */
-function resolveSwarmBigCombat(){
-  // sample a bunch
-  const samples = 1100;
-  const bigLive = bigSnakes.filter(s=>s.alive);
-
-  for (let k=0;k<samples;k++){
-    const si = randInt(0, SWARM_COUNT-1);
-    const s = swarm[si];
-    if (!s.alive) continue;
-
-    const b = bigLive[randInt(0, bigLive.length-1)];
-    if (!b || !b.alive) continue;
-
-    // if near big snake head/body area
-    if (dist2XZ(s.pos, b.head) > (12*12)) continue;
-
-    // approximate big snake body by sampling some segments
-    const step = b.length() > 140 ? 3 : 2;
-    let nearIdx = -1;
-    for (let i=1;i<b.length();i+=step){
-      if (dist2XZ(s.pos, b.segments[i]) < (0.7*0.7)){
-        nearIdx = i; break;
+      // if target longer, attacker dies
+      if (target.length() > attacker.length()) {
+        if (attacker === player) { gameOver(); return; }
+        killSnake(attacker);
+        break;
       }
-    }
-    if (nearIdx === -1) continue;
 
-    if (b.length() > s.len){
-      // swarm dies (big eats it)
-      b.grow(s.len); // full length transfer feel
-      s.alive = false;
-      dropDotsFromPositions([s.pos], 0.8);
-    } else {
-      // swarm is huge and can “bite” big snake: cut off some tail as dots
-      const cutLen = Math.min(8, Math.max(2, Math.floor(s.len * 0.05)));
-      const newLen = Math.max(CUT_MIN_KEEP, b.length() - cutLen);
-      const tail = b.segments.slice(newLen);
-      dropDotsFromBigSegments(tail, 0.9);
-      b.segments = b.segments.slice(0, newLen);
-      b.sync(true);
+      // target is smaller/equal
+      const isMiddle = hitIndex >= MIDDLE_MARGIN && hitIndex <= (tPhys - 1 - MIDDLE_MARGIN);
 
-      s.len = clamp(s.len + cutLen, SWARM_MIN_LEN, SWARM_MAX_LEN);
+      if (isMiddle) {
+        // Split target into 2 snakes; attacker gains tailLen
+        if (target === player) { gameOver(); return; }
+        const before = target.length();
+        const { tailLen } = splitSnake(target, hitIndex);
+
+        // attacker gains tail half length
+        attacker.grow(tailLen);
+
+        // If the target became too tiny logically, still keep it (danger stays high)
+        // (No food respawn, so we keep snakes alive for jeopardy.)
+        // Also: split increases snake count -> trim if needed
+        trimSnakeCountIfNeeded();
+      } else {
+        // Fully eaten: attacker gains full target length
+        const gained = target.length();
+        if (target === player) { gameOver(); return; }
+        killSnake(target);
+        attacker.grow(gained);
+      }
+
+      break;
     }
   }
 }
 
-/* -----------------------------
+/* =========================
    CAMERA
------------------------------ */
-function updateCamera(dt){
+========================= */
+function updateCamera(dt) {
   const target = player.head;
-  const desiredPos = new THREE.Vector3(target.x, 20, target.z + 24);
+  const desiredPos = new THREE.Vector3(target.x, 20, target.z + 26);
   camera.position.lerp(desiredPos, 1 - Math.pow(0.0002, dt));
   camera.lookAt(target.x, 0, target.z);
 }
 
-/* -----------------------------
-   MAIN LOOP
------------------------------ */
+/* =========================
+   LOOP
+========================= */
 let last = performance.now();
 
-function tick(now){
-  const dt = Math.min(0.033, (now - last)/1000);
-  last = now;
-  elapsed += dt;
+function tick(now) {
+  try {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    elapsed += dt;
 
-  if (!dead){
-    // Promote swarm into big snakes
-    // Promote a few per second to avoid spikes
-    for (let tries=0; tries<4; tries++){
-      const i = randInt(0, SWARM_COUNT-1);
-      if (swarm[i].alive && swarm[i].len >= PROMOTE_LEN){
-        promoteSwarmIndex(i);
-      }
+    if (!dead) {
+      // update snakes
+      for (const s of snakes) if (s.alive) s.update(dt, elapsed);
+
+      // eat finite food
+      for (const s of snakes) if (s.alive) eatFood(s);
+
+      // combat
+      resolveCombat();
+
+      // update food visuals
+      syncFoodInstances();
+
+      // camera + HUD
+      updateCamera(dt);
+
+      const foodLeft = foodAlive.reduce((acc, v) => acc + (v ? 1 : 0), 0);
+      const rampPct = Math.round((globalSpeedMult(elapsed) - 1) * 100);
+      const liveAI = snakes.filter(s => s.alive && !s.isPlayer).length;
+
+      statsEl.innerHTML =
+        `<b>Len:</b> ${player.length()} &nbsp; <b>Speed:</b> ${player.currentSpeed(elapsed).toFixed(2)} ` +
+        `&nbsp; <b>Ramp:</b> +${rampPct}% &nbsp; <b>Food left:</b> ${foodLeft}/${FOOD_COUNT} ` +
+        `&nbsp; <b>AI:</b> ${liveAI}`;
     }
 
-    // Update big snakes + eat
-    for (const s of bigSnakes){
-      if (s.alive) {
-        s.update(dt, elapsed);
-        eatFoodBig(s);
-      }
-    }
-
-    // Update swarm + eat
-    updateSwarm(dt);
-    for (let i=0;i<SWARM_COUNT;i++){
-      const s = swarm[i];
-      if (!s.alive) continue;
-      eatFoodSwarm(s);
-    }
-
-    // Combat (parallel)
-    resolveSwarmCombat();
-    resolveBigCombat();
-    resolveSwarmBigCombat();
-
-    // Visual sync
-    syncFood();
-    syncSwarm();
-
-    // HUD
-    updateCamera(dt);
-    const rampPct = Math.round((globalSpeedMult(elapsed)-1)*100);
-    const swarmLive = swarm.filter(s=>s.alive).length;
-    const bigLive = bigSnakes.filter(s=>s.alive && !s.isPlayer).length;
-
-    statsEl.innerHTML =
-      `<b>Player Len:</b> ${player.length()} &nbsp; <b>Ramp:</b> +${rampPct}% &nbsp; ` +
-      `<b>Swarm Alive:</b> ${swarmLive}/${SWARM_COUNT} &nbsp; <b>Big Snakes:</b> ${bigLive}/${BIG_MAX}`;
+    renderer.render(scene, camera);
+  } catch (e) {
+    console.error("Tick error:", e);
+    // keep loop alive even if something goes wrong
   }
 
-  renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
 
-/* -----------------------------
+/* =========================
    RESIZE
------------------------------ */
+========================= */
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
