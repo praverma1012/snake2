@@ -33,7 +33,7 @@ import * as THREE from "three";
 const WORLD_SIZE = 90;
 
 // SCARCE finite food (NO respawn)
-const FOOD_COUNT = 45;
+const FOOD_COUNT = 22;
 
 // 50 real snakes from the start
 const AI_COUNT = 50;
@@ -384,7 +384,7 @@ snakes.push(player);
 
 function spawnAI(){
   // All AIs start small (no “random huge” on spawn)
-  const len = randInt(2, 7);
+  const len = randInt(6, 14);
   const s = new Snake({
     isPlayer: false,
     colorHex: new THREE.Color().setHSL(Math.random(), 0.78, 0.55).getHex(),
@@ -407,7 +407,7 @@ function eatFood(s){
   // FOOD_COUNT is tiny; scan all is fine: 51 snakes * 45 food = 2295 checks/frame
   for (let i = 0; i < FOOD_COUNT; i++) {
     if (!foodAlive[i]) continue;
-    if (dist2XZ(s.head, foodPos[i]) < FOOD_EAT_R2) {
+    if (dist2XZ(s.head, foodPos[i]) < 1.6 * 1.6) {
       foodAlive[i] = false;
       s.grow(s.isPlayer ? GROW_FOOD_PLAYER : GROW_FOOD_AI);
       break; // only eat one per frame
@@ -487,7 +487,7 @@ function resolveCombat(){
 ----------------------------- */
 function updateCamera(dt){
   const target = player.head;
-  const desired = new THREE.Vector3(target.x, 20, target.z + 26);
+  const desired = new THREE.Vector3(target.x, 16, target.z + 18);
   camera.position.lerp(desired, 1 - Math.pow(0.0002, dt));
   camera.lookAt(target.x, 0, target.z);
 }
