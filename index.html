@@ -379,11 +379,13 @@ class BigSnake {
   }
 
   destroy(){
-    this.alive = false;
-    scene.remove(this.mesh);
-    this.mesh.geometry.dispose();
-    this.mesh.material.dispose();
-  }
+  this.alive = false;
+  scene.remove(this.mesh);
+
+  // IMPORTANT: do NOT dispose geometry here because it is shared (segGeo).
+  // Disposing it will break all other snakes and can freeze the game.
+  this.mesh.material.dispose();
+}
 }
 
 /* -----------------------------
